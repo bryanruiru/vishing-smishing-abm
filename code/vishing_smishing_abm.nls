@@ -1,0 +1,614 @@
+;;==============================================================================
+;;TOPIC: AN AGENT-BASED MODEL FOR SOCIAL ENGINEERING RESILIENCE BASED ON USER BEHAVIOUR.
+;;AUTHOR: RUIRU BRYAN NJOROGE
+;;==============================================================================
+;;
+;; SCENARIO PRESETS (configure Interface sliders/switches):
+;;   Baseline:  training-effectiveness = 0.00, campaigns = OFF, reporting = OFF, networks = OFF
+;;   Moderate:  training-effectiveness = 0.15, campaigns = ON,  reporting = ON,  networks = OFF
+;;   Strong:    training-effectiveness = 0.30, campaigns = ON,  reporting = ON,  networks = ON
+;;
+
+breed [users user]
+breed [attackers attacker]
+
+;; Two network layers: strong family ties and weaker community/workplace ties
+undirected-link-breed [family-links family-link]
+undirected-link-breed [community-links community-link]
+
+globals [
+  total-attacks failed-attacks attack-success-rate
+  avg-user-awareness avg-user-trust
+  attack-count-vishing attack-count-smishing reported-attacks-count
+  successful-attacks-global
+  attacks-this-tick successes-this-tick
+  recent-attacks-list recent-successes-list
+  rolling-attack-success-rate
+]
+
+users-own [
+  trust-level authority-bias urgency-bias social-proof-bias
+  awareness experience-level fear-of-authority risk-perception
+  compromised? compromised-time attacks-received
+  successful-attacks reported?
+  reporting-propensity age-group communication-pref family-group community-group
+]
+
+attackers-own [
+  attack-type
+  last-campaign-tick persona-list current-persona
+  sophistication-level success-count failure-count success-rate
+  adaptation-threshold targets-per-campaign
+]
+
+;;==============================================================================
+;; SETUP
+;;==============================================================================
+
+to setup
+  clear-all
+  reset-ticks
+
+  set total-attacks 0
+  set successful-attacks-global 0
+  set failed-attacks 0
+  set attack-count-vishing 0
+  set attack-count-smishing 0
+  set reported-attacks-count 0
+  set attacks-this-tick 0
+  set successes-this-tick 0
+  set recent-attacks-list []
+  set recent-successes-list []
+  set rolling-attack-success-rate 0
+
+  create-users num-users [
+    setup-user
+    set shape "person"
+    setxy random-xcor random-ycor
+  ]
+
+  create-attackers num-attackers [
+    setup-attacker
+    set shape "wolf"
+    set size 2
+    setxy random-xcor random-ycor
+  ]
+
+  if enable-family-networks [ create-family-networks ]
+
+  ;; Initial training: intervention scenarios start with a baseline awareness boost.
+  ;; Realistic: organisations embarking on security programmes begin with
+  ;; staff orientation/training before periodic campaigns follow.
+  if enable-awareness-campaigns and training-effectiveness > 0 [
+    let initial-reach floor (num-users * (0.10 + training-effectiveness * 0.5))
+    ask n-of (min list initial-reach count users) users [
+      set awareness min list 0.95 (awareness + (training-effectiveness * 0.3))
+    ]
+  ]
+
+  update-metrics
+  update-visual-appearance
+end
+
+to setup-user
+  set trust-level random-normal 0.52 0.14
+  set trust-level max list 0.25 (min list 0.85 trust-level)
+
+  set authority-bias random-normal 0.38 0.14
+  set urgency-bias random-normal 0.65 0.14
+  set social-proof-bias random-normal 0.28 0.09
+
+  set awareness random-float 0.22
+  set experience-level random-float 1.0
+  if experience-level > 0.7 [ set awareness min list 0.42 (awareness + 0.2) ]
+
+  set fear-of-authority random-normal 0.35 0.16
+
+  set compromised? false
+  set compromised-time 0
+  set attacks-received 0
+  set successful-attacks 0
+  set reported? false
+  set risk-perception random-float 0.10  ;; most people start with low risk perception
+
+  set reporting-propensity random-normal 0.18 0.06
+  set reporting-propensity max list 0.05 (min list 0.28 reporting-propensity)
+
+  set age-group one-of-weighted [["young" 0.32] ["middle" 0.48] ["elderly" 0.20]]
+  if age-group = "elderly" [
+    set awareness awareness * 0.68
+    set trust-level min list 0.85 (trust-level + 0.12)
+  ]
+  if age-group = "young" [
+    ;; Digital natives: slightly higher baseline awareness but overconfident
+    set awareness awareness * 1.10
+    set trust-level min list 0.80 (trust-level + 0.06)
+    ;; Risk perception lower due to "it won't happen to me" bias
+    set risk-perception risk-perception * 0.70
+  ]
+
+  ;; Kenya comms: 66% feature phones + 58% smartphones, M-Pesa uses SMS.
+  ;; Most users use both voice and SMS; pure voice-only or sms-only are minorities.
+  set communication-pref one-of-weighted [["both" 0.55] ["voice" 0.25] ["sms" 0.20]]
+  ;; Family groups: ~150 groups for 500 users → avg ~3.3 per family (realistic nuclear family)
+  set family-group random 150
+  ;; Community groups: ~25 groups → avg ~20 per group (workplace, church, neighbourhood)
+  set community-group random 25
+
+  set color white
+  set size 1
+end
+
+to setup-attacker
+  set attack-type one-of ["vishing" "smishing"]
+  set last-campaign-tick (- random campaign-interval)
+
+  set persona-list ["Safaricom Alert" "M-Pesa Transaction Issue" "Bank Alert"
+                    "CEO Request" "Government Official" "Prize Notification"]
+  set current-persona one-of persona-list
+
+  set sophistication-level random-normal 0.50 0.15
+  set sophistication-level max list 0.3 (min list 0.95 sophistication-level)
+
+  set success-count 0
+  set failure-count 0
+  set success-rate 0
+  set adaptation-threshold 0.10
+  set targets-per-campaign 12 + random 20
+  ;; Color by attack channel: orange = vishing, magenta = smishing
+  ifelse attack-type = "vishing" [ set color orange ] [ set color magenta ]
+end
+
+to create-family-networks
+  ;; Layer 1: Family ties (small, strong connections - 2-5 members)
+  let family-ids remove-duplicates [family-group] of users
+  foreach family-ids [ fam-id ->
+    let family-members users with [family-group = fam-id]
+    if count family-members > 1 [
+      ask family-members [
+        create-family-links-with other family-members [
+          set color blue
+          set thickness 0.3
+        ]
+      ]
+    ]
+  ]
+
+  ;; Layer 2: Community/workplace ties (larger groups, weaker connections)
+  ;; Each person links to 2-4 random community members (not fully connected)
+  let community-ids remove-duplicates [community-group] of users
+  foreach community-ids [ com-id ->
+    let community-members users with [community-group = com-id]
+    if count community-members > 2 [
+      ask community-members [
+        let potential-links other community-members with [not community-link-neighbor? myself]
+        let n-links min list (2 + random 3) (count potential-links)
+        if n-links > 0 [
+          create-community-links-with n-of n-links potential-links [
+            set color green + 2
+            set thickness 0.1
+          ]
+        ]
+      ]
+    ]
+  ]
+end
+
+;;==============================================================================
+;; GO PROCEDURE
+;;==============================================================================
+
+to go
+  if ticks >= simulation-duration [ stop ]
+
+  ;; Reset per-tick counters for rolling-window tracking
+  set attacks-this-tick 0
+  set successes-this-tick 0
+
+  ask attackers [
+    if (ticks - last-campaign-tick) >= campaign-interval [
+      launch-campaign
+      set last-campaign-tick ticks
+
+      if (success-count + failure-count) > 10 [
+        set success-rate success-count / (success-count + failure-count)
+        if success-rate < adaptation-threshold [ adapt-strategy ]
+      ]
+    ]
+  ]
+
+  if enable-peer-reporting [
+    ask users with [reported?] [
+      spread-awareness
+      set reported? false
+    ]
+  ]
+
+  ;; Recovery: compromised users recover after 5 days but learn minimally.
+  ;; Real-world: many scam victims fall for scams again (repeat victimisation).
+  ask users with [compromised? and (ticks - compromised-time) > 5] [
+    set compromised? false
+    set awareness min list 0.95 (awareness + 0.001)
+  ]
+
+  if enable-awareness-campaigns and (ticks mod 30 = 0) and (ticks > 0) [
+    conduct-training-campaign
+  ]
+
+  ;; Risk perception decay: without recent incidents, perceived risk fades.
+  ask users [
+    set risk-perception max list 0.0 (risk-perception - 0.003)
+  ]
+
+  ;; Awareness decay: without reinforcement, people gradually forget.
+  ;; Rate of 0.001/day → yearly loss ~0.365. Now matchable by training.
+  ask users [
+    set awareness max list 0.01 (awareness - 0.001)
+  ]
+
+  ;; Trust recovery: over time, people gradually return to baseline trust.
+  ;; Rate of 0.001/day — very slow drift back toward natural trust level.
+  ask users [
+    let baseline-trust 0.52
+    ifelse trust-level < baseline-trust [
+      set trust-level min list baseline-trust (trust-level + 0.001)
+    ] [
+      set trust-level max list baseline-trust (trust-level - 0.001)
+    ]
+  ]
+
+  update-metrics
+
+  ;; ---- Rolling-window (60-day) attack success tracking ----
+  set recent-attacks-list lput attacks-this-tick recent-attacks-list
+  set recent-successes-list lput successes-this-tick recent-successes-list
+  if length recent-attacks-list > 60 [
+    set recent-attacks-list but-first recent-attacks-list
+    set recent-successes-list but-first recent-successes-list
+  ]
+  let window-attacks sum recent-attacks-list
+  let window-successes sum recent-successes-list
+  ifelse window-attacks > 0 [
+    set rolling-attack-success-rate (window-successes / window-attacks) * 100
+  ] [
+    set rolling-attack-success-rate 0
+  ]
+
+  update-visual-appearance
+  tick
+end
+
+;;==============================================================================
+;; ATTACK PROCEDURES
+;;==============================================================================
+
+to launch-campaign
+  ;; Already-compromised users are not re-targeted (realistic: scammers move on)
+  let eligible-targets users with [
+    communication-pref = "both" or
+    (communication-pref = "voice" and [attack-type] of myself = "vishing") or
+    (communication-pref = "sms"   and [attack-type] of myself = "smishing")
+  ]
+  let possible-targets eligible-targets with [not compromised?]
+
+  let num-targets min list targets-per-campaign (count possible-targets)
+  let my-who who  ;; capture attacker identity for correct attribution
+  if num-targets > 0 [
+    ;; Attacker targeting intelligence: more sophisticated attackers profile victims.
+    ;; vulnerability-score determines how attractive a target is to the attacker.
+    ;; Low awareness, high trust, elderly, and previous victims are preferred.
+    let targeting-bias sophistication-level  ;; 0-1: how much the attacker profiles
+    let target-pool sort-on [
+      (- ( (1 - awareness) * 0.4            ;; low awareness = attractive
+         + trust-level * 0.3                 ;; high trust = attractive
+         + (ifelse-value (age-group = "elderly") [0.15] [0])
+         + (ifelse-value (successful-attacks > 0) [0.15] [0])
+         )) * targeting-bias                 ;; sophisticated attackers use this info
+         - random-float (1 - targeting-bias) ;; less sophisticated → more random
+    ] possible-targets
+
+    ;; Take the top N most attractive targets
+    let targets sublist target-pool 0 num-targets
+    foreach targets [ t ->
+      ask t [
+        receive-attack [current-persona] of myself [attack-type] of myself [sophistication-level] of myself my-who
+      ]
+    ]
+  ]
+end
+
+to receive-attack [persona attack-mode attacker-sophistication attacker-id]
+  set attacks-received attacks-received + 1
+
+  ;; --- LOGISTIC COMPLIANCE MODEL ---
+  ;; We accumulate a logit score (log-odds) then convert to probability
+  ;; via the logistic function: p = 1 / (1 + exp(-logit)).
+  ;; Intercept -1.2 calibrated so an average untrained user (trust 0.52,
+  ;; awareness 0.10, typical attack bonuses) sees ~40-45% compliance
+  ;; rate, providing clear separation from intervention scenarios.
+  let logit -1.2                         ;; intercept (v5.1)
+
+  ;; Trust: higher trust → more likely to comply (adjusted to 1.4)
+  ;; 0.52 × 1.4 = +0.73 (balances awareness protection)
+  set logit logit + (trust-level * 1.4)
+
+  ;; Awareness: the key lever for intervention scenarios.
+  ;; Coefficient -5.5: awareness 0.3 subtracts 1.65, awareness 0.5 subtracts 2.75.
+  ;; This creates strong protection that rewards sustained training.
+  set logit logit + (awareness * -5.5)
+
+  ;; Authority personas (Safaricom, M-Pesa, Bank, Government)
+  ;; Vishing amplifies authority effect – voice impersonation is more convincing.
+  ;; Smishing dampens it – text-only makes impersonation less credible.
+  let authority-multiplier 1.0
+  if attack-mode = "vishing"  [ set authority-multiplier 1.4 ]
+  if attack-mode = "smishing" [ set authority-multiplier 0.7 ]
+  if member? persona ["Safaricom Alert" "M-Pesa Transaction Issue" "Bank Alert" "Government Official"] [
+    set logit logit + (authority-bias * 0.9 * authority-multiplier)
+  ]
+
+  ;; Urgency personas (M-Pesa Transaction Issue, Account Locked)
+  ;; Vishing creates real-time pressure – victim can't pause to think.
+  ;; Smishing allows time to reflect, reducing urgency effectiveness.
+  let urgency-multiplier 1.0
+  if attack-mode = "vishing"  [ set urgency-multiplier 1.5 ]
+  if attack-mode = "smishing" [ set urgency-multiplier 0.6 ]
+  if member? persona ["M-Pesa Transaction Issue" "Account Locked"] [
+    set logit logit + (urgency-bias * 0.7 * urgency-multiplier)
+  ]
+
+  ;; Fear of authority (cultural factor – Kenyan context)
+  ;; Vishing amplifies fear – a live authoritative voice is more intimidating.
+  if fear-of-authority > 0.4 [
+    let fear-multiplier ifelse-value (attack-mode = "vishing") [1.3] [0.8]
+    set logit logit + (fear-of-authority * 0.6 * fear-multiplier)
+  ]
+
+  ;; Attacker sophistication
+  set logit logit + (attacker-sophistication * 0.8)
+
+  ;; Channel base effects – vishing is ~3x more effective than smishing
+  ;; Vishing: real-time voice manipulation, caller-ID spoofing, emotional pressure
+  ;; Smishing: link-click required, user can ignore/delete, but lower barrier to send
+  if attack-mode = "vishing"  [ set logit logit + 0.55 ]
+  if attack-mode = "smishing" [ set logit logit + 0.15 ]
+
+  ;; Social proof from compromised network neighbours
+  ;; Family members have stronger social influence than community contacts
+  if enable-family-networks [
+    let family-influence 0
+    if any? family-link-neighbors [
+      let fam-rate (count family-link-neighbors with [compromised?]) / count family-link-neighbors
+      set family-influence fam-rate * 1.5  ;; family influence is strong
+    ]
+    let community-influence 0
+    if any? community-link-neighbors [
+      let com-rate (count community-link-neighbors with [compromised?]) / count community-link-neighbors
+      set community-influence com-rate * 0.6  ;; community influence is weaker
+    ]
+    set logit logit + (social-proof-bias * (family-influence + community-influence))
+  ]
+
+  ;; Experience dampening (modest effect — experience alone doesn't prevent scams)
+  set logit logit - (experience-level * 0.2)
+
+  ;; Risk perception: users who perceive higher risk are more cautious
+  set logit logit - (risk-perception * 0.8)
+
+  ;; Age-group modifiers
+  ;; Elderly: lower digital literacy, higher trust = more susceptible
+  if age-group = "elderly" [ set logit logit + 0.45 ]
+  ;; Young (18-30): overconfidence + high digital engagement = moderate susceptibility
+  ;; AAG 2024: millennials/Gen-Z victimised 23% vs Gen-X 19%
+  if age-group = "young" [ set logit logit + 0.25 ]
+
+  ;; Convert logit to probability via logistic function
+  let compliance-prob 1 / (1 + exp (- logit))
+
+  ;; Count this attack attempt (regardless of outcome)
+  set total-attacks total-attacks + 1
+  set attacks-this-tick attacks-this-tick + 1
+
+  ifelse random-float 1 < compliance-prob [
+    ;; ATTACK SUCCEEDED
+    set compromised? true
+    set compromised-time ticks
+    set successful-attacks successful-attacks + 1
+    set successes-this-tick successes-this-tick + 1
+
+    if attack-mode = "vishing"  [ set attack-count-vishing  attack-count-vishing  + 1 ]
+    if attack-mode = "smishing" [ set attack-count-smishing attack-count-smishing + 1 ]
+
+    ask attacker attacker-id [
+      set success-count success-count + 1
+    ]
+
+    if random-float 1 < reporting-propensity [
+      set reported? true
+      set reported-attacks-count reported-attacks-count + 1
+    ]
+
+    ;; Learning from victimisation: people learn a little from being scammed,
+    ;; but without formal training the lesson is shallow and fades quickly.
+    let victim-learning 0.002
+    let training-bonus (training-effectiveness * 0.4)
+    set awareness min list 0.95 (awareness + victim-learning + training-bonus)
+
+    ;; Trust erosion: being scammed makes users more skeptical of unsolicited contact
+    set trust-level max list 0.10 (trust-level - 0.05)
+
+    ;; Risk perception spike: victimisation raises risk awareness
+    set risk-perception min list 0.95 (risk-perception + 0.006)
+
+  ] [
+    ;; ATTACK FAILED
+    set failed-attacks failed-attacks + 1
+
+    ask attacker attacker-id [
+      set failure-count failure-count + 1
+    ]
+
+    ;; Resisting an attack provides negligible awareness — most people
+    ;; don't even realise they were targeted by a social engineer.
+    set awareness min list 0.95 (awareness + 0.0003)
+
+    ;; Risk perception: resisted attacks barely register consciously
+    set risk-perception min list 0.95 (risk-perception + 0.0003)
+
+    if random-float 1 < (reporting-propensity * 0.5) [
+      set reported? true
+      set reported-attacks-count reported-attacks-count + 1
+    ]
+  ]
+end
+
+;;==============================================================================
+;; ADAPTATION & AWARENESS PROCEDURES
+;;==============================================================================
+
+to adapt-strategy
+  ;; Persona rotation: try a different lure
+  set current-persona one-of persona-list
+
+  ;; Channel switching: 30% chance to swap vishing ↔ smishing when failing
+  ;; Real-world: attackers pivot channels when defences tighten on one vector
+  if random-float 1 < 0.30 [
+    ifelse attack-type = "vishing"
+      [ set attack-type "smishing" ]
+      [ set attack-type "vishing" ]
+    ;; Update color to reflect new channel
+    ifelse attack-type = "vishing" [ set color orange ] [ set color magenta ]
+  ]
+
+  ;; Sophistication growth: diminishing returns as it approaches ceiling
+  ;; Growth = 0.08 × (1 - current), so high sophistication grows slower
+  let growth 0.08 * (1 - sophistication-level)
+  set sophistication-level min list 0.95 (sophistication-level + growth)
+
+  ;; Campaign size adjustment: if success rate is very low, cast a wider net
+  ;; (spray-and-pray fallback); if moderate, keep targeted attacks
+  if success-rate < 0.05 [
+    set targets-per-campaign min list 50 (targets-per-campaign + 5)
+  ]
+  if success-rate > 0.15 [
+    set targets-per-campaign max list 8 (targets-per-campaign - 3)
+  ]
+
+  ;; Reset counters for next evaluation window
+  set success-count 0
+  set failure-count 0
+end
+
+to spread-awareness
+  ;; Family links: moderate awareness spread (close bonds, but limited impact)
+  if any? family-link-neighbors [
+    ask family-link-neighbors [
+      set awareness min list 0.95 (awareness + 0.03)
+      set trust-level max list 0.10 (trust-level - 0.01)
+    ]
+  ]
+  ;; Community links: weak awareness spread (acquaintances, less influence)
+  if any? community-link-neighbors [
+    ask community-link-neighbors [
+      set awareness min list 0.95 (awareness + 0.015)
+      set trust-level max list 0.10 (trust-level - 0.005)
+    ]
+  ]
+end
+
+to conduct-training-campaign
+  ;; Reach scales with programme investment:
+  ;; Moderate (0.15): ~20%, Strong (0.30): ~25%
+  ;; Gain per session = training-effectiveness × 0.5 (halved for realism)
+  ;; Moderate: +0.075/session, Strong: +0.15/session
+  let training-size floor (num-users * (0.15 + training-effectiveness * 0.35))
+  ask n-of (min list training-size count users) users [
+    set awareness min list 0.95 (awareness + (training-effectiveness * 0.5))
+  ]
+end
+
+;;==============================================================================
+;; VISUAL & METRICS
+;;==============================================================================
+
+to update-visual-appearance
+  ask users [
+    ifelse compromised? [
+      set color red
+    ] [
+      ifelse reported? [
+        set color yellow
+      ] [
+        ;; Age-group coloring: young = cyan, middle = white, elderly = violet
+        if age-group = "young"   [ set color cyan ]
+        if age-group = "middle"  [ set color white ]
+        if age-group = "elderly" [ set color violet ]
+      ]
+    ]
+    set size 0.8 + (awareness * 1.0)
+  ]
+end
+
+to update-metrics
+  set successful-attacks-global sum [successful-attacks] of users
+  if total-attacks > 0 [
+    set attack-success-rate (successful-attacks-global / total-attacks) * 100
+  ]
+  if any? users [
+    set avg-user-awareness mean [awareness] of users
+    set avg-user-trust mean [trust-level] of users
+  ]
+end
+
+;;==============================================================================
+;; REPORTERS (monitors / plots)
+;;==============================================================================
+
+to-report compromised-users-count
+  report count users with [compromised?]
+end
+
+to-report victimization-rate
+  report (count users with [successful-attacks > 0] / num-users) * 100
+end
+
+to-report reporting-rate
+  ifelse total-attacks > 0 [
+    report (reported-attacks-count / total-attacks) * 100
+  ] [ report 0 ]
+end
+
+to-report low-awareness-count
+  report count users with [awareness < 0.4]
+end
+
+to-report awareness-non-victims
+  ifelse any? users with [successful-attacks = 0] [
+    report mean [awareness] of users with [successful-attacks = 0]
+  ] [ report 0 ]
+end
+
+to-report awareness-victims
+  ifelse any? users with [successful-attacks > 0] [
+    report mean [awareness] of users with [successful-attacks > 0]
+  ] [ report 0 ]
+end
+
+to-report rolling-success-rate
+  report rolling-attack-success-rate
+end
+
+;;==============================================================================
+;; HELPER
+;;==============================================================================
+
+to-report one-of-weighted [options]
+  let total-weight sum map last options
+  let r random-float total-weight
+  let cumulative 0
+  foreach options [ opt ->
+    set cumulative cumulative + last opt
+    if r < cumulative [ report first opt ]
+  ]
+  report first first options
+end
